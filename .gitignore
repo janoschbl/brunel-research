@@ -1,0 +1,25 @@
+.gradle/
+build/
+local.properties
+.idea/
+*.iml
+.kotlin/
+
+CLAUDE.md
+AGENTS.md
+.claude/
+.codex/
+.t3/
+
+# Recordings and evidence can contain Bluetooth addresses and location data.
+capture/src/main/assets/fieldtest/
+exploit/src/main/assets/fieldtest/
+research/.venv/
+research/sessions/
+research/*.egg-info/
+__pycache__/
+.pytest_cache/
+*.pyc
+lab/build/
+lab/logs/
+*.core

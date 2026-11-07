@@ -1,0 +1,22 @@
+services:
+  target:
+    build: .
+    privileged: true
+    devices:
+      - /dev/vhci:/dev/vhci
+    environment:
+      LAB_MODE: ${LAB_MODE:-eir}
+      ASAN_OPTIONS: detect_leaks=0:abort_on_error=1:symbolize=1
+    ports:
+      - "9000:9000"
+    volumes:
+      - ./logs:/tmp/lab
+
+  attacker:
+    build: .
+    depends_on:
+      - target
+    environment:
+      LAB_MODE: attacker
+    entrypoint: ["/bin/bash", "-lc"]
+    command: ["sleep infinity"]

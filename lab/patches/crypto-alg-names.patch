@@ -1,0 +1,108 @@
+diff --git a/src/shared/crypto.c b/src/shared/crypto.c
+index 5449621..6d6fd40 100644
+--- a/src/shared/crypto.c
++++ b/src/shared/crypto.c
+@@ -84,46 +84,54 @@ static int urandom_setup(void)
+ 
+ static int ecb_aes_setup(void)
+ {
++	static const char *names[] = { "ecb(aes)", "ecb(aes-lib)", "ecb-aes-aesni" };
+ 	struct sockaddr_alg salg;
+ 	int fd;
++	size_t i;
+ 
+-	fd = socket(PF_ALG, SOCK_SEQPACKET | SOCK_CLOEXEC, 0);
+-	if (fd < 0)
+-		return -1;
++	for (i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
++		fd = socket(PF_ALG, SOCK_SEQPACKET | SOCK_CLOEXEC, 0);
++		if (fd < 0)
++			return -1;
+ 
+-	memset(&salg, 0, sizeof(salg));
+-	salg.salg_family = AF_ALG;
+-	strcpy((char *) salg.salg_type, "skcipher");
+-	strcpy((char *) salg.salg_name, "ecb(aes)");
++		memset(&salg, 0, sizeof(salg));
++		salg.salg_family = AF_ALG;
++		strcpy((char *) salg.salg_type, "skcipher");
++		strcpy((char *) salg.salg_name, names[i]);
++
++		if (bind(fd, (struct sockaddr *) &salg, sizeof(salg)) == 0)
++			return fd;
+ 
+-	if (bind(fd, (struct sockaddr *) &salg, sizeof(salg)) < 0) {
+ 		close(fd);
+-		return -1;
+ 	}
+ 
+-	return fd;
++	return -1;
+ }
+ 
+ static int cmac_aes_setup(void)
+ {
++	static const char *names[] = { "cmac(aes)", "cmac-aes-lib" };
+ 	struct sockaddr_alg salg;
+ 	int fd;
++	size_t i;
+ 
+-	fd = socket(PF_ALG, SOCK_SEQPACKET | SOCK_CLOEXEC, 0);
+-	if (fd < 0)
+-		return -1;
++	for (i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
++		fd = socket(PF_ALG, SOCK_SEQPACKET | SOCK_CLOEXEC, 0);
++		if (fd < 0)
++			return -1;
+ 
+-	memset(&salg, 0, sizeof(salg));
+-	salg.salg_family = AF_ALG;
+-	strcpy((char *) salg.salg_type, "hash");
+-	strcpy((char *) salg.salg_name, "cmac(aes)");
++		memset(&salg, 0, sizeof(salg));
++		salg.salg_family = AF_ALG;
++		strcpy((char *) salg.salg_type, "hash");
++		strcpy((char *) salg.salg_name, names[i]);
++
++		if (bind(fd, (struct sockaddr *) &salg, sizeof(salg)) == 0)
++			return fd;
+ 
+-	if (bind(fd, (struct sockaddr *) &salg, sizeof(salg)) < 0) {
+ 		close(fd);
+-		return -1;
+ 	}
+ 
+-	return fd;
++	return -1;
+ }
+ 
+ static struct bt_crypto *singleton;
+@@ -136,28 +144,8 @@ struct bt_crypto *bt_crypto_new(void)
+ 	singleton = new0(struct bt_crypto, 1);
+ 
+ 	singleton->ecb_aes = ecb_aes_setup();
+-	if (singleton->ecb_aes < 0) {
+-		free(singleton);
+-		singleton = NULL;
+-		return NULL;
+-	}
+-
+ 	singleton->urandom = urandom_setup();
+-	if (singleton->urandom < 0) {
+-		close(singleton->ecb_aes);
+-		free(singleton);
+-		singleton = NULL;
+-		return NULL;
+-	}
+-
+ 	singleton->cmac_aes = cmac_aes_setup();
+-	if (singleton->cmac_aes < 0) {
+-		close(singleton->urandom);
+-		close(singleton->ecb_aes);
+-		free(singleton);
+-		singleton = NULL;
+-		return NULL;
+-	}
+ 
+ 	return bt_crypto_ref(singleton);
+ }

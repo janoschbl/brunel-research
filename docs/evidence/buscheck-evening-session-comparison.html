@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Evening capture comparison</title>
+<style>
+body{margin:0;color:var(--foreground);font-family:var(--font-sans);background:transparent}
+table{width:100%;border-collapse:collapse;font-size:14px;line-height:1.45;table-layout:fixed}
+th,td{text-align:left;vertical-align:top;padding:12px 8px;border-bottom:1px solid var(--border);overflow-wrap:anywhere}
+th{font-weight:500;color:var(--muted-foreground)}
+th:first-child,td:first-child{padding-left:0;width:29%}
+th:nth-child(2),td:nth-child(2){width:24%;font-variant-numeric:tabular-nums}
+th:last-child,td:last-child{padding-right:0}
+small{display:block;font-size:12px;color:var(--muted-foreground);margin-top:4px}
+@media(max-width:420px){table{font-size:13px}th,td{padding:10px 5px}th:first-child,td:first-child{width:27%}}
+</style>
+</head>
+<body>
+<table aria-label="Three exports, two distinct capture sessions. Only the completed long session and its earlier prefix identify line 11.">
+<thead><tr><th>27 Oct session<br>Berlin time</th><th>Recorded data</th><th>What it contains</th></tr></thead>
+<tbody>
+<tr><td>18:15–18:34<small>b9e9 · completed</small></td><td>31,485 events<br>7,918 reports</td><td>Line 11, route reads, three bench runs<small>Use the (1).zip or identical standalone JSONL.</small></td></tr>
+<tr><td>18:15–18:20<small>b9e9 · live export</small></td><td>5,440 events<br>2,666 reports</td><td>Exact prefix of the completed capture<small>Do not count as another test.</small></td></tr>
+<tr><td>18:12:03–18:12:26<small>e3bd · completed</small></td><td>216 events<br>116 reports</td><td>Protocol 18, no line text<small>Zero bench targets; no line 11 identification.</small></td></tr>
+</tbody>
+</table>
+</body>
+</html>

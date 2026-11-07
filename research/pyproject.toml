@@ -1,0 +1,23 @@
+[project]
+name = "brunel-bench"
+version = "1.0.0"
+description = "BLE exploit bench for PaderSprinter BusAccess modules"
+requires-python = ">=3.11"
+dependencies = ["bumble>=0.0.236"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pytest-asyncio>=0.24", "rich>=13"]
+
+[project.scripts]
+brunel = "brunel.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["brunel*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

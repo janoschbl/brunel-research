@@ -1,0 +1,6 @@
+cmake_minimum_required(VERSION 3.16)
+include($ENV{IDF_PATH}/tools/cmake/project.cmake)
+project(s3_buscheck)
+if(NOT IDF_TARGET STREQUAL "esp32s3")
+    message(FATAL_ERROR "Buscheck requires ESP32-S3; do not flash an ESP32 WROOM")
+endif()

@@ -1,0 +1,38 @@
+package dev.padermodern.capture
+
+import java.io.File
+import java.time.Instant
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
+import org.junit.Assume.assumeTrue
+import org.junit.Test
+
+// set bus_log_dir to unzipped sessions to replay parser version 1
+class CaptureLogReplayTest {
+    @Test fun oldSessionsDecodeProtocol18OnLoad() {
+        val root = System.getenv("BUS_LOG_DIR")?.let(::File)
+        assumeTrue("BUS_LOG_DIR not set", root?.isDirectory == true)
+        val logs = root!!.walk().filter { it.name == "events.jsonl" }.sortedBy { it.path }.toList()
+        assumeTrue(logs.isNotEmpty())
+        val report = StringBuilder()
+        var failed = 0
+        for (log in logs) {
+            val index = CaptureIndex()
+            log.forEachLine { line ->
+                val e = CaptureJson.decodeFromString(Event.serializer(), line)
+                index.apply(e, Instant.parse(e.timestampUtc).toEpochMilli())
+            }
+            val snap = index.snapshot()
+            failed += snap.failedAds
+            report.appendLine("== ${log.parentFile?.name}: ${snap.totalAds} Pakete, ${snap.failedAds} nicht dekodiert")
+            snap.profiles.forEach { p ->
+                report.appendLine("  ${p.shortAddress} Protokoll ${p.protocols} · ${p.failures} Fehler")
+                p.runs.map { "${lineLabel(it.lineId, it.line)} → ${destinationLabel(it.destinationId, it.destination)} · ${stopLabel(it.nextStopId, it.nextStop)}" }
+                    .distinct().forEach { report.appendLine("    $it") }
+            }
+        }
+        File("build/capture-replay.txt").apply { parentFile?.mkdirs() }.writeText(report.toString())
+        assertEquals(report.toString(), 0, failed)
+        assertTrue(report.contains("8 → NeuenbekenHoltgrevenstraße · Rathausplatz"))
+    }
+}
