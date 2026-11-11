@@ -25,6 +25,42 @@ def test_arm_chain_layout_three_register_gadget():
     assert value[272:274] == b"id"
 
 
+def test_arm_chain_layout_lr_gadget():
+    # pop {r0, r4, lr}; bx r4 -> r0, then lr = return, then system
+    value = arm_rop(
+        0x11111111,
+        0x22222222,
+        "id",
+        offset=256,
+        lr_gadget=0x33333333,
+        return_addr=0x44444444,
+    )
+    assert value[256:272] == bytes.fromhex(
+        "3333333310010000""11111111""45444444"
+    )  # fmt: skip
+    assert value[272:274] == b"id"
+
+
+def test_arm_chain_shadow_places_command_at_absolute_copy():
+    # command_addr is absolute, shadow_base makes the local write relative
+    value = arm_rop(
+        0x11111111,
+        0x22222222,
+        "id",
+        offset=260,
+        lr_gadget=0x33333333,
+        return_addr=0x44444444,
+        command_addr=0x1000 + 260 + 16,
+        shadow_base=0x1000,
+    )
+    assert value[260 + 16 : 260 + 18] == b"id"
+
+
+def test_lr_gadget_needs_return_address():
+    with pytest.raises(ValueError):
+        arm_rop(0x1, 0x2, "id", lr_gadget=0x3)
+
+
 def test_aarch64_chain_layout():
     value = aarch64_rop(0x1111111111111111, 0x2222222222222222, "id", offset=256)
     assert value[256:280] == bytes.fromhex(

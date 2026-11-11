@@ -21,6 +21,36 @@ Kotlin · Python · BlueZ 5.78 · Android 12+
 
 ---
 
+> [!WARNING]
+> **Nur Bildungs- und Forschungsprojekt. Keine Gewähr, kein offizielles Advisory, Nutzung auf eigene Gefahr.**
+>
+> Alles hier ist ein persönliches Lern- und Forschungsprojekt. Ich bin weder
+> Hersteller noch Betreiber noch Sicherheitsauditor, und nichts davon wurde
+> professionell geprüft.
+>
+> - **Es spricht mit echten Bussen.** Aktionswrites ändern live das
+>   Fahrgastdisplay, und `0x01` ist eine echte Haltewunschanforderung. Ein
+>   512-Byte-Overflow nimmt dem Modul Bluetooth, bis seine App neu startet —
+>   womöglich mitten auf der Fahrt.
+> - **Der Emulator ist ein Modell, nicht das Produkt.** Adressen, Offsets,
+>   Canary und libc sind meine. Eine Kette, die im Emulator landet, ist kein
+>   Beweis, dass sie im Fahrzeug landet. Siehe [die Grenzen](../docs/en/rce-emulator-2026-11-11.md#limits).
+> - **Firmware, Hardwarerevisionen und Builds unterscheiden sich je Modul.** Ein
+>   Ergebnis an einem Bus ist keine Garantie für einen anderen, und ein negatives
+>   Ergebnis ist kein Beweis für Sicherheit.
+> - **Behalte einen Weg zurück.** Nicht an einem Bus anfangen, der gleich die
+>   eigene Haltestelle erreicht, und damit rechnen, dass das eine oder andere
+>   Modul einen Neustart per Strom braucht.
+> - Teile des Codes, des Labors und dieser Notizen sind mit KI-Unterstützung
+>   entstanden. Ich habe alles gelesen und ausgeführt, aber Fehler sind
+>   wahrscheinlich.
+>
+> Nicht verbunden mit PaderSprinter, dem Nahverkehrsverbund Paderborn/Höxter,
+> H&D Wireless, ivanto oder dem BlueZ-Projekt. Keine Haftung für verpasste Busse,
+> geänderte Displays oder unbrauchbar gewordene Module.
+
+---
+
 ## Warum es das gibt
 
 Ich habe [PaderBrunel](https://github.com/janoschbl/PaderBrunel) gebaut, einen inoffiziellen Android-Client für den PaderSprinter-Fahrplan. Damit der Live-Bus-Bildschirm funktioniert, habe ich zurückentwickelt, wie die Original-App einen Bus findet und ihn nach Routentext fragt. Das führte mich zu den BLE-Modulen an den Haltestellen und in den Fahrzeugen.
@@ -43,8 +73,11 @@ Die Forschung ist unabhängig und nicht mit PaderSprinter, dem Verkehrsverbund o
 | MTU 517 wird auf dem Ziel ausgehandelt | Feldlauf und Labor | Bestätigt |
 | Android verwirft numerische GATT-Status und nutzt veraltete Service-Objekte wieder | Feldlogs, reproduziert als Status 201 | Im Client behoben |
 | Der EIR-Namensbug ist über Androids Advertising-API nicht erreichbar | API-Form und App-Verhalten | Bestätigt, braucht einen Linux-Host |
+| Der Aktionspfad erreicht eine vollständige RCE-Kette auf einem modellierten Ziel | [Emulatorlauf](../docs/en/rce-emulator-2026-11-11.md): Canary, PIE-Basis, `system()`, Persistenz, Reverse Shell | Nur Emulator |
 
-Die beiden Live-Kandidaten stehen unten. Keiner davon ist bisher eine bewiesene Remote-Shell auf einem Bus.
+Die beiden Live-Kandidaten stehen unten. Keiner davon ist bisher eine bewiesene
+Remote-Shell auf einem Bus; der Emulatorabschnitt zeigt, wie weit der Aktionspfad
+kommt, sobald die Adressen bekannt sind.
 
 ## Die Bugs
 
@@ -66,6 +99,54 @@ pop {r0, r4, pc} ; <command pointer> ; filler ; system ; "cmd"
 
 Der Builder hält den Befehlszeiger gerade und setzt das Thumb-Bit nur auf dem Gadget und `system`. Der Feldlauf hat noch keinen Absturz geliefert, daher sind Ziel-Offset, Canary-Zustand und Adressen weiter offen. Die Leiter ist der nächste Schritt.
 
+## Das emulierte Ziel: eine vollständige Kette, abseits des Busses
+
+Auf einen Ziel-Dump zu warten dauert, also habe ich das Ziel selbst geschrieben:
+[`lab/emulator/bus_module.c`](../lab/emulator/bus_module.c), ein kleines
+ARMv7-musl-static-GATT-Peripheriegerät mit der echten 15-Handle-Datenbank
+(`0x1f1f` / `0x1f20`, `0x201f` / `0x2020`, Device Name, PnP, GATT), echten
+ATT-Operationen bei MTU 517 und der unbegrenzten Kopie in `char buf[256]`. Ein
+[Supervisor](../lab/emulator/supervisor.py) besitzt Werbung, Energiezustand und
+Neustartpolitik, sodass ein Absturz zu einer gemessenen Ausfallzeit wird,
+`SHUTDOWN` die App wirklich beendet und `BOOT` sie neu startet. Client,
+Gate-Reihenfolge und Fehlersemantik sind derselbe Code und dieselbe Reihenfolge
+wie im Bus.
+
+Gegen dieses Ziel läuft die Kette Ende zu Ende — ret2libc bei Offset 260/264,
+`pop {r0, r4, lr}; bx r4`, `system()`, Rücksprung in `emu_continue`, damit ein
+Prozess viele Befehle bedient — und alles danach ebenso:
+
+| Schritt | Ergebnis |
+|---|---|
+| 512-Byte-Gate-Absturz | Ausfall, App startet neu, Bluetooth kommt zurück |
+| Wiederholte Ketten, gleicher Prozess | Befehle laufen, kein Neustart dazwischen |
+| Canary-Brute-Force, Byte für Byte | 4/4 Bytes von Null rekonstruiert, zweimal, danach 0 Abstürze |
+| PIE-Basis-Brute-Force, 64 Layouts | `pie_47` bei `0x420000`, dann der Beweisbefehl |
+| Persistenz mit dem `0x42`-Backdoor | läuft nach einem Reboot ohne jeden Overflow |
+| Gefälschter Werbename und Routentext | `EVILBUS` in AD-Typ `0x09`, `9a:aa:…` bei `0x2020`, überlebt einen Stromzyklus |
+| Datei-Exfiltration und Fernabschaltung | ja |
+| Abgekoppelte Reverse Shell | interaktives `bash -i`, Ziel bedient weiter (`crashes` 0) |
+
+Drei Profile modellieren, was im Feld begegnen kann: `plain` (kein Canary),
+`canary` (Stack-Canary, über das Absturz-Orakel erbrute-forced) und `pie` (Canary
+plus 64 verschobene Basen). Die Kette ist 16 Bytes, der Befehl liegt direkt
+dahinter in einem Spiegelpuffer, der Zeiger wird also abgeleitet, nicht
+hartkodiert.
+
+```sh
+lab/emulator/build.sh
+python3 lab/emulator/supervisor.py --port 9200 --state /tmp/brunel-test --profile plain
+python3 lab/emulator/exploit.py --port 9200 --cmd "id"
+python3 lab/emulator/brute.py --port 9201     # Canary-Orakel
+python3 lab/emulator/pie.py   --port 9202     # Canary + Basis
+```
+
+**Die ehrliche Grenze:** Jede Adresse in diesen Läufen ist eine
+Emulator-Adresse, und qemu-user reicht `system()` an die Host-`/bin/sh` weiter,
+`id` zeigt also den Host-Benutzer. Echter Offset, Canary-Zustand, libc-Basis,
+Gadget und Prozessbenutzer sind weiter unbekannt. Vor einem Bus-Ergebnis
+[die Ausarbeitung](../docs/en/rce-emulator-2026-11-11.md) lesen.
+
 ## Wie die Arbeit lief
 
 Ich begann mit dem Kartieren der Original-App und einer Feldaufzeichnung. Die Aufzeichnungen enthielten bereits den BlueZ-Namen und die Service-Map. Danach baute ich ein BlueZ-5.78-ASan-Labor, reproduzierte den EIR-Überlauf und richtete den virtuellen Pi-Bus und die Aktionsstufe ein.
@@ -80,10 +161,13 @@ Die ersten Aktionsläufe scheiterten lokal, nicht remote. Android lieferte Statu
 - MTU-Aushandlung, Write Commands, Prepare Writes und Execute Write.
 - Die Längenleiter, die die erste Absturzlänge ohne Firmware-Dump findet.
 - Der Labor-End-to-End-Beweis und der ARMv7-Kettenbeweis unter qemu.
+- Ein selbst geschriebener ARMv7-Emulator mit Supervisor, drei Profilen, Canary-Orakel und PIE-Brute-Force.
+- Im Emulator: Befehle, Exfiltration, gefälschte Werbung, Persistenz über Reboot, Fernabschaltung und eine Reverse Shell.
 - Die Python- und Gradle-Tests laufen durch.
 
 ## Was noch fehlt
 
+- Alles von „Emulator“ zu „Bus“: auf einem echten Modul ist noch keine Kette gelandet.
 - Der Puffer-Offset auf dem echten Ziel. Die Leiter misst ihn.
 - Ein Canary-Wert, falls der Build `-fstack-protector` nutzt.
 - Die libc-Basis, `system` und ein Gadget. Dafür braucht es einen Dump, ein Leck oder Brute Force.
@@ -165,6 +249,14 @@ lab/scripts/repro-eir.sh
 
 `action-rop.sh` beweist die x86-64- und ARMv7-Builder unter dem nativen Host und qemu.
 
+Der Emulator baut und läuft ebenfalls ohne Funkberechtigungen:
+
+```sh
+lab/emulator/build.sh
+python3 lab/emulator/supervisor.py --port 9200 --state /tmp/brunel-test --profile plain
+python3 lab/emulator/exploit.py --port 9200 --cmd id
+```
+
 ## Field-Kit
 
 - Android-Telefon mit der Capture-App.
@@ -176,6 +268,7 @@ lab/scripts/repro-eir.sh
 
 | Dokument | Inhalt |
 |---|---|
+| [RCE-Emulator 2026-11-11](../docs/en/rce-emulator-2026-11-11.md) | Selbst geschriebenes ARMv7-Ziel, Profile, vollständige Kette, Grenzen (englisch) |
 | [Feldlauf 2026-11-07](../docs/de/rce-field-run-2026-11-07.md) | Client-Fix, Zustellbeweis, Laufreihenfolge, Entscheidungsbaum |
 | [Phase-2-Plan](../docs/de/rce-phase-2-plan-2026-11-07.md) | Hardware-Urteil, Gates, Offset- und Canary-Plan |
 | [RCE-Notizen 2026-10-29](../docs/de/rce-2026-10-29.md) | Korrigiertes EIR-Ergebnis, Aktionsstufe, Ketten-Builder |
@@ -206,6 +299,42 @@ lab/scripts/repro-eir.sh
 
 ## Disclaimer
 
-Dies ist ein inoffizielles Forschungsprojekt. Es ist nicht mit PaderSprinter, dem Nahverkehrsverbund Paderborn/Höxter, H&D Wireless oder ivanto verbunden. Adressen und Zeitstempel stammen aus meinen eigenen Aufzeichnungen. Behandle sie als Beobachtungen, nicht als Attestierung.
+> [!CAUTION]
+> **Das ist ein Bildungs- und Forschungsprojekt. Kein Produkt, kein Advisory,
+> keine Gewähr. Nutzung auf eigene Gefahr.**
 
-Teile des Codes, der Laborskripte und der Dokumentation wurden mit KI-Unterstützung geschrieben. Ich habe alles geprüft und ausgeführt. Die Belegabschnitte sagen, was gemessen und was abgeleitet ist.
+Lies das, bevor du irgendetwas auf einen echten Bus richtest:
+
+1. **Nur zur Bildung.** Das Repository existiert, um zu lernen, wie BLE, GATT,
+   BlueZ und ein Stack-Overflow sich verhalten. Es ist kein gehärtetes Werkzeug
+   und nicht auditiert. Wer einen unterstützten Weg braucht, fragt den Betreiber,
+   nicht dieses README.
+2. **Es ändert echten Zustand.** `0x01` ist eine echte Haltewunschanforderung.
+   `0x02`–`0x04` sind echte Fahrgastaktionen. Jeder Write ist auf dem Display
+   sichtbar und kann beeinflussen, was der Bus tut.
+3. **Es kann dem Modul Bluetooth nehmen.** Ein 512-Byte-Overflow tötet die App,
+   bis sie neu startet; ein falsches Canary-Byte tut dasselbe, und ein
+   Brute-Force tut es tausendmal. Das kann bedeuten, dass der Live-Bildschirm
+   ausfällt, bis jemand das Modul vom Strom nimmt — womöglich nach deiner
+   Haltestelle.
+4. **Der Emulator ist nicht das Produkt.** Offset, Canary, libc-Basis, Gadget und
+   Benutzer im Emulator sind meine. Eine Kette, die dort läuft, ist ein starker
+   Hinweis, kein Beweis für ein Fahrzeug. Firmware und Hardwarerevisionen
+   unterscheiden sich je Modul, und ein negatives Ergebnis beweist nichts.
+5. **Rechne mit Irrtümern.** Dokumentation driftet, Adressen ändern sich mit dem
+   Build, und ein guter Teil des Codes ist mit KI-Unterstützung entstanden. Ich
+   habe ausgeführt, was hier beschrieben ist, aber nicht jede Kombination, und
+   Fehler bleiben.
+6. **Keine Haftung.** Verpasste Busse, geänderte Displays, blockierte Module,
+   erloschene Garantien, genervte Fahrer — alles deins. Behalte ein
+   Kontrollmodul, einen Weg zurück, und fange nicht an, wenn deine Haltestelle
+   naht.
+
+Das Projekt ist inoffiziell und nicht mit PaderSprinter, dem Nahverkehrsverbund
+Paderborn/Höxter, H&D Wireless, ivanto oder dem BlueZ-Projekt verbunden. Adressen
+und Zeitstempel stammen aus meinen eigenen Aufzeichnungen; behandle sie als
+Beobachtungen, nicht als Attestierung. Die Belegabschnitte sagen, was gemessen
+und was abgeleitet ist — glaube dem Ersten, nicht dem Zweiten.
+
+Wenn du einen Fehler, eine nicht mehr passende Adresse oder ein abweichendes
+Modul findest, ist ein Issue wirklich willkommen.

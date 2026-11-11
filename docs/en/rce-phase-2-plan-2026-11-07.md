@@ -265,6 +265,11 @@ command effect is observed.
   `L-3`, `L-4` after each recovery.
 - ARMv7 `system` and the gadget need the Thumb bit; the command pointer stays
   even. The builder already enforces this.
+- Correction from the emulator run: on a musl build the gadget is Thumb but
+  libc `system` is ARM, and `system` returns through `lr` rather than `[sp]`.
+  The chain therefore loads `lr` with a `pop {r0, r4, lr}; bx r4` gadget and
+  leaves `system` without the Thumb bit. See
+  `docs/en/rce-emulator-2026-11-11.md`.
 - If a dump is impossible, prefer a command pointer in the same buffer and a
   gadget plus `system` from a plausible `libc` mapping. One page is 4096 bytes;
   brute force that low nibble range first, not the whole address space.

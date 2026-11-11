@@ -21,6 +21,33 @@ Kotlin · Python · BlueZ 5.78 · Android 12+
 
 ---
 
+> [!WARNING]
+> **Educational research only. No warranty, no official advisory, use at your own risk.**
+>
+> Everything in this repository is a personal learning and research project. I am
+> not the vendor, the operator, or a security auditor, and nothing here has been
+> through a professional review.
+>
+> - **It talks to real buses.** Action writes change live passenger displays, and
+>   `0x01` is a genuine stop request. A 512-byte overflow drops the module's
+>   Bluetooth until its app restarts — possibly in the middle of a journey.
+> - **The emulator is a model, not the product.** Its addresses, offsets, canary
+>   and libc are mine. A chain that lands in the emulator does not prove it lands
+>   on a vehicle. See [the limits](docs/en/rce-emulator-2026-11-11.md#limits).
+> - **Firmware, hardware revisions and builds differ per module.** A result on one
+>   bus is not a guarantee for another, and a negative result is not proof of
+>   safety.
+> - **Keep a way back.** Do not start on a bus that is about to reach your stop,
+>   and expect the odd module to need a power cycle.
+> - Parts of the code, the lab and these notes were written with AI assistance. I
+>   read and ran everything, but bugs are likely.
+>
+> Not affiliated with PaderSprinter, Nahverkehrsverbund Paderborn/Höxter,
+> H&D Wireless, ivanto or the BlueZ project. No liability for missed buses,
+> changed displays or bricked modules.
+
+---
+
 ## Why this exists
 
 I built [PaderBrunel](https://github.com/janoschbl/PaderBrunel), an unofficial Android client for the PaderSprinter timetable. To make the live bus screen work, I reverse engineered how the original app finds a bus and asks it for route text. That led me to the BLE modules at the stops and in the vehicles.
@@ -43,8 +70,11 @@ The research is independent and unaffiliated with PaderSprinter, the transport a
 | MTU 517 is negotiated on the target | Field run and lab | Confirmed |
 | Android drops numeric GATT statuses and reused stale service objects | Field logs, reproduced as status 201 | Fixed in the client |
 | The EIR name bug is not reachable from Android's advertising API | API shape and app behavior | Confirmed, needs a Linux host |
+| The action path reaches a full RCE chain on a modelled target | [Emulator run](docs/en/rce-emulator-2026-11-11.md): canary, PIE base, `system()`, persistence, reverse shell | Emulator only |
 
-The two live candidates are below. Neither is a proven remote shell on a bus yet.
+The two live candidates are below. Neither is a proven remote shell on a bus yet;
+the emulator section shows how far the action path gets once the addresses are
+known.
 
 ## The bugs
 
@@ -66,6 +96,52 @@ pop {r0, r4, pc} ; <command pointer> ; filler ; system ; "cmd"
 
 The builder keeps the command pointer even and sets the Thumb bit only on the gadget and `system`. The field run has not delivered a crash yet, so the target offset, canary state, and addresses are still open. The ladder is the next step.
 
+## The emulated target: a full chain, off the bus
+
+Waiting for a target dump is slow, so I wrote the target myself:
+[`lab/emulator/bus_module.c`](lab/emulator/bus_module.c), a small ARMv7
+musl-static GATT peripheral with the real 15-handle database (`0x1f1f` /
+`0x1f20`, `0x201f` / `0x2020`, Device Name, PnP, GATT), real ATT operations at
+MTU 517, and the unbounded copy into `char buf[256]`. A
+[supervisor](lab/emulator/supervisor.py) owns advertisements, power state and
+restart policy, so a crash becomes a measured outage, `SHUTDOWN` really stops the
+app, and `BOOT` restarts it. The client, the gate order and the failure semantics
+are the same code and the same order as on the bus.
+
+Against that target the chain runs end to end — ret2libc at offset 260/264,
+`pop {r0, r4, lr}; bx r4`, `system()`, return into `emu_continue` so one process
+serves many commands — and so does everything after it:
+
+| Step | Result |
+|---|---|
+| 512-byte gate crash | outage, app restarts, Bluetooth returns |
+| Repeated chains, same process | commands run, no restart between them |
+| Canary brute force, byte by byte | 4/4 bytes recovered from scratch, twice, 0 crashes afterwards |
+| PIE base brute force, 64 layouts | `pie_47` at `0x420000`, then the proof command |
+| Persistence with the `0x42` backdoor | runs without any overflow after a reboot |
+| Forged advertisement name and route | `EVILBUS` in AD type `0x09`, `9a:aa:…` at `0x2020`, survives a power cycle |
+| File exfiltration and remote shutdown | yes |
+| Detached reverse shell | interactive `bash -i`, target keeps serving (`crashes` 0) |
+
+Three profiles model what the field can meet: `plain` (no canary), `canary`
+(stack canary, brute-forced through the crash oracle) and `pie` (canary plus 64
+relocated bases). The chain is 16 bytes and the command sits right behind it in
+a mirror buffer, so the pointer is derived, not hardcoded.
+
+```sh
+lab/emulator/build.sh
+python3 lab/emulator/supervisor.py --port 9200 --state /tmp/brunel-test --profile plain
+python3 lab/emulator/exploit.py --port 9200 --cmd "id"
+python3 lab/emulator/brute.py --port 9201     # canary oracle
+python3 lab/emulator/pie.py   --port 9202     # canary + base
+```
+
+**The honest limit:** every address in those runs is an emulator address, and
+qemu-user hands `system()` to the host `/bin/sh`, so `id` prints the host user.
+The real offset, canary state, libc base, gadget and process user are still
+unknown. Read [the write-up](docs/en/rce-emulator-2026-11-11.md) before treating
+any of it as a bus result.
+
 ## How the work ran
 
 I started by mapping the original app and recording a field session. The recordings already contained the BlueZ name and the service map. After that I built a BlueZ 5.78 ASan lab, reproduced the EIR overflow, and set up the Pi virtual bus and the action stage.
@@ -80,10 +156,13 @@ The first action runs failed locally, not remotely. Android returned status 201 
 - MTU negotiation, write commands, prepare writes, and Execute Write.
 - The length ladder, which finds the first crash length without a firmware dump.
 - The lab end-to-end proof and the ARMv7 chain proof under qemu.
+- A self-written ARMv7 emulator with a supervisor, three profiles, a canary oracle and a PIE brute force.
+- On the emulator: commands, exfiltration, forged adverts, persistence across reboot, remote shutdown and a reverse shell.
 - The Python and Gradle tests pass.
 
 ## What is still missing
 
+- Everything from "emulator" to "bus": no chain has landed on a real module yet.
 - The buffer offset on the real target. The ladder measures it.
 - A canary value if the build uses `-fstack-protector`.
 - The libc base, `system`, and a gadget. These need a dump, a leak, or a brute force.
@@ -165,6 +244,14 @@ lab/scripts/repro-eir.sh
 
 `action-rop.sh` proves the x86-64 and ARMv7 builders under the native host and qemu.
 
+The emulator builds and runs without radio permissions too:
+
+```sh
+lab/emulator/build.sh
+python3 lab/emulator/supervisor.py --port 9200 --state /tmp/brunel-test --profile plain
+python3 lab/emulator/exploit.py --port 9200 --cmd id
+```
+
 ## Field kit
 
 - Android phone with the capture app.
@@ -176,6 +263,7 @@ lab/scripts/repro-eir.sh
 
 | Document | Content |
 |---|---|
+| [RCE emulator 2026-11-11](docs/en/rce-emulator-2026-11-11.md) | Self-written ARMv7 target, profiles, full chain, limits |
 | [Field run 2026-11-07](docs/en/rce-field-run-2026-11-07.md) | Client fix, delivery proof, run order, decision tree |
 | [Phase 2 plan](docs/en/rce-phase-2-plan-2026-11-07.md) | Hardware verdict, gates, offset and canary plan |
 | [RCE notes 2026-10-29](docs/en/rce-2026-10-29.md) | Corrected EIR result, action stage, chain builders |
@@ -206,6 +294,38 @@ lab/scripts/repro-eir.sh
 
 ## Disclaimer
 
-This is an unofficial research project. It is not affiliated with PaderSprinter, Nahverkehrsverbund Paderborn/Höxter, H&D Wireless, or ivanto. Addresses and timestamps come from my own recordings. Treat them as observations, not attestation.
+> [!CAUTION]
+> **This is an educational research project. Not a product, not an advisory, no
+> warranty of any kind. Use it at your own risk.**
 
-Parts of the code, lab scripts, and documentation were written with AI assistance. I reviewed and ran everything. The evidence sections say what is measured and what is inferred.
+Read this before you point anything at a real bus:
+
+1. **Educational only.** The repo exists to learn how BLE, GATT, BlueZ and a
+   stack overflow behave. It is not hardened tooling and it is not audited. If
+   you need a supported path, ask the operator, not this README.
+2. **It changes real state.** `0x01` is a genuine stop request. `0x02`–`0x04`
+   are real passenger actions. Every write is visible on the vehicle display and
+   can influence what the bus does.
+3. **It can take the module off Bluetooth.** A 512-byte overflow kills the app
+   until it restarts; a wrong canary guess does the same, and a brute force does
+   it a thousand times. That can mean no live bus screen until someone
+   power-cycles the module — possibly after your stop.
+4. **The emulator is not the product.** Offsets, canary, libc base, gadget and
+   user in the emulator are mine. A chain that works there is a strong hint, not
+   proof for a vehicle. Firmware and hardware revisions differ per module, and a
+   negative result proves nothing.
+5. **Expect to be wrong.** Documentation drifts, addresses change with the build,
+   and a lot of the code was written with AI assistance. I ran what is described
+   here, but I have not run every combination, and bugs remain.
+6. **No liability.** Missed buses, changed displays, wedged modules, voided
+   warranties, angry drivers — all yours. Keep a control module, a way back, and
+   do not start on a bus that is about to reach your stop.
+
+This project is unofficial and unaffiliated with PaderSprinter,
+Nahverkehrsverbund Paderborn/Höxter, H&D Wireless, ivanto or the BlueZ project.
+Addresses and timestamps come from my own recordings; treat them as
+observations, not attestation. The evidence sections say what is measured and
+what is inferred — believe the first, not the second.
+
+If you find a mistake, an address that no longer matches, or a module that
+behaves differently, an issue is genuinely welcome.

